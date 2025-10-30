@@ -1,156 +1,103 @@
-# app.py  — Anna Vissi Streams dashboard (robust)
-import os, glob
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import streamlit as st
+# app.py — fix duplicate numbering (No already exists)
 
-st.set_page_config(page_title="Anna Vissi — Total Streams", layout="wide")
-st.title("Anna Vissi — Total Streams")
-st.caption("Personal tool • Source: MusicMetricsVault.com (estimates)")
+import os, glob, pandas as pd, matplotlib.pyplot as plt, streamlit as st
 
 TOTALS_CSV = "mmv_total_streams.csv"
 TRACKS_DIR = "mmv_tracks_daily"
 
-# ----------------- Helpers -----------------
+st.set_page_config(page_title="Anna Vissi — Total Streams", layout="wide")
+st.markdown("# Anna Vissi — Total Streams")
+st.caption("Personal tool · Source: MusicMetricsVault.com (estimates)")
+
 @st.cache_data
 def load_totals_csv(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
-        return pd.DataFrame()
-    df = pd.read_csv(path)
-    # Coerce expected columns / tolerate weird files
-    if "date" not in df.columns:
-        # try set column names if missing
-        if df.shape[1] >= 3:
-            df.columns = ["date", "total_plays", "daily_delta"] + list(df.columns[3:])
-        else:
-            return pd.DataFrame()
-
+        return pd.DataFrame(columns=["date","total_plays","daily_delta","source"])
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    if df.columns[0].lower().startswith("﻿date"):
+        df.rename(columns={df.columns[0]: "date"}, inplace=True)
+    df = df[df["date"].astype(str).str.match(r"\d{4}-\d{2}-\d{2}", na=False)]
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date"])
-    if "total_plays" in df.columns:
-        df["total_plays"] = pd.to_numeric(df["total_plays"], errors="coerce").fillna(0).astype(int)
+    df = df.dropna(subset=["date"]).sort_values("date")
+    df["total_plays"] = pd.to_numeric(df["total_plays"], errors="coerce").fillna(0).astype(int)
     if "daily_delta" in df.columns:
         df["daily_delta"] = pd.to_numeric(df["daily_delta"], errors="coerce").fillna(0).astype(int)
-    return df.sort_values("date")
+    else:
+        df["daily_delta"] = 0
+    return df
 
 @st.cache_data
-def _list_track_files(track_dir: str):
-    # prefer deduped; fall back to raw
-    files = sorted(glob.glob(os.path.join(track_dir, "mmv_track_streams_*_deduped.csv")))
-    raw   = sorted(glob.glob(os.path.join(track_dir, "mmv_track_streams_*.csv")))
-    if files: 
-        return files
-    return raw
-
-@st.cache_data
-def load_tracks_today_prev(track_dir: str):
-    files = _list_track_files(track_dir)
+def load_latest_tracks(dirpath: str) -> pd.DataFrame:
+    if not os.path.isdir(dirpath):
+        return pd.DataFrame(columns=["title","plays","cover_url","release_date","daily_delta"])
+    files = sorted(glob.glob(os.path.join(dirpath, "mmv_track_streams_*_deduped.csv")))
     if not files:
-        return pd.DataFrame(), pd.DataFrame(), None, None
-    today_path = files[-1]
-    prev_path  = files[-2] if len(files) >= 2 else None
+        return pd.DataFrame(columns=["title","plays","cover_url","release_date","daily_delta"])
+    df = pd.read_csv(files[-1], encoding="utf-8-sig")
+    if "plays" not in df and "total" in df:
+        df.rename(columns={"total":"plays"}, inplace=True)
+    df["plays"] = pd.to_numeric(df.get("plays", 0), errors="coerce").fillna(0).astype(int)
+    if "daily_delta" not in df.columns:
+        df["daily_delta"] = 0
+    df["title"] = df.get("title").astype(str)
+    df["cover_url"] = df.get("cover_url")
+    return df
 
-    def _read(p):
-        if p is None or not os.path.exists(p):
-            return pd.DataFrame()
-        df = pd.read_csv(p)
-        # normalize column names
-        df = df.rename(columns={"track":"title"})
-        if "title" not in df.columns: return pd.DataFrame()
-        if "plays" in df.columns:
-            df["plays"] = pd.to_numeric(df["plays"], errors="coerce").fillna(0).astype(int)
-        # keep helpful columns only
-        keep = [c for c in ["title","plays","duration","release_date"] if c in df.columns]
-        return df[keep]
+totals = load_totals_csv(TOTALS_CSV)
 
-    df_today = _read(today_path)
-    df_prev  = _read(prev_path)
-    return df_today, df_prev, today_path, prev_path
-
-def add_daily_change(df_today, df_prev):
-    if df_today.empty:
-        return df_today.assign(daily_change=np.nan)
-    if df_prev.empty:
-        return df_today.assign(daily_change=0)
-
-    # merge by (normalized) title + duration if available
-    t = df_today.copy()
-    p = df_prev.copy()
-
-    def keyify(d):
-        k = d["title"].str.strip().str.lower()
-        k = k.str.normalize("NFKD").str.encode("ascii", errors="ignore").str.decode("utf-8")
-        if "duration" in d.columns:
-            return k + "|" + d["duration"].fillna("").astype(str)
-        return k
-
-    t["_k"] = keyify(t)
-    p["_k"] = keyify(p)
-
-    merged = t.merge(p[["_k","plays"]].rename(columns={"plays":"plays_prev"}), on="_k", how="left")
-    merged["plays_prev"] = pd.to_numeric(merged["plays_prev"], errors="coerce").fillna(0).astype(int)
-    merged["daily_change"] = (merged["plays"] - merged["plays_prev"]).astype(int)
-    return merged.drop(columns=["_k"])
-
-# ----------------- Load data -----------------
-# totals
-try:
-    totals = load_totals_csv(TOTALS_CSV)
-except Exception as e:
-    st.error(f"Failed to read totals CSV: {e}")
-    totals = pd.DataFrame()
-
-# tracks
-tracks_today, tracks_prev, f_today, f_prev = load_tracks_today_prev(TRACKS_DIR)
-tracks = add_daily_change(tracks_today, tracks_prev)
-
-# ----------------- UI: metrics -----------------
 if totals.empty:
-    st.warning("The mmv_total_streams.csv file is empty.")
+    st.warning("The **mmv_total_streams.csv** file is empty.")
 else:
     latest = totals.iloc[-1]
-    total = int(latest.get("total_plays", 0))
-    delta = int(latest.get("daily_delta", 0))
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Streams", f"{total:,}")
-    c2.metric("Daily Streams (Δ)", f"{delta:+,}")
-    c3.metric("Last update", latest["date"].date().strftime("%d/%m/%Y"))
+    c1, c2, c3 = st.columns([1,1,1])
+    c1.metric("Total Streams", f"{int(latest['total_plays']):,}")
+    c2.metric("Daily Streams (Δ)", f"{int(latest.get('daily_delta',0)):+,}")
+    c3.metric("Last Update", latest["date"].strftime("%d/%m/%Y"))
 
-    # plot
-    fig, ax = plt.subplots(figsize=(5, 2.5))
+    # smaller chart: 50% (από 6×3 -> 3×1.5)
+    fig, ax = plt.subplots(figsize=(3, 1.5))
     ax.plot(totals["date"], totals["total_plays"], linewidth=2)
     ax.grid(True, linestyle="--", alpha=0.5)
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Total Streams")
+    ax.set_xlabel("Date"); ax.set_ylabel("Total Streams")
     ax.set_title("Total Streams Over Time")
-    st.pyplot(fig)
+    st.pyplot(fig, use_container_width=False)
 
-# ----------------- UI: track table -----------------
-st.subheader("Track Performance")
+st.markdown("## Track Performance")
 
-if tracks.empty:
-    st.info("No track file found yet in the folder 'mmv_tracks_daily'.")
+tracks = load_latest_tracks(TRACKS_DIR)
+
+# επιλογή sort
+sort_by = st.radio("Sort by", ["Total Streams", "Daily"], horizontal=True, label_visibility="collapsed")
+if sort_by == "Daily":
+    tracks = tracks.sort_values("daily_delta", ascending=False).reset_index(drop=True)
 else:
-    sort_by = st.radio(
-        "Sort by",
-        ["Total Streams", "Daily Streams (Δ)"],
-        horizontal=True,
-        index=0
-    )
-    view = tracks.copy()
-    # default sort total desc
-    if sort_by == "Daily Streams (Δ)":
-        view = view.sort_values(["daily_change","plays","title"], ascending=[False, False, True])
-    else:
-        view = view.sort_values(["plays","title"], ascending=[False, True])
+    tracks = tracks.sort_values("plays", ascending=False).reset_index(drop=True)
 
-    # show clean columns with indexing
-    nice = view.rename(columns={"title":"Title","plays":"Total Streams","daily_change":"Daily Streams (Δ)"})
-    nice.insert(0, "#", range(1, len(nice)+1))
-    st.dataframe(nice, height=520)
+# numbering 1..N (μόνο αν δεν υπάρχει ήδη)
+if "No" not in tracks.columns:
+    tracks.insert(0, "No", tracks.index + 1)
+else:
+    tracks["No"] = range(1, len(tracks) + 1)
 
-    # file hints
-    ft = os.path.basename(f_today) if f_today else "—"
-    fp = os.path.basename(f_prev) if f_prev else "—"
-    st.caption(f"Using: **{ft}**  ·  Previous for Δ: **{fp}**")
+# view (με κόμματα)
+view = pd.DataFrame({
+    "No": tracks["No"],
+    "Cover": tracks.get("cover_url"),
+    "Title": tracks["title"],
+    "Total Streams": tracks["plays"].map(lambda x: f"{x:,}"),
+    "Daily (Δ)": tracks["daily_delta"].map(lambda x: f"{x:+,}")
+})
+
+st.dataframe(
+    view,
+    column_order=["No","Cover","Title","Total Streams","Daily (Δ)"],
+    hide_index=True,
+    use_container_width=True,
+    column_config={
+        "No": st.column_config.NumberColumn("No", width="small"),
+        "Cover": st.column_config.ImageColumn("Cover", help="Album art", width="small"),
+        "Title": st.column_config.TextColumn("Title", width="large"),
+        "Total Streams": st.column_config.TextColumn("Total Streams", width="medium"),
+        "Daily (Δ)": st.column_config.TextColumn("Daily (Δ)", width="small"),
+    },
+)

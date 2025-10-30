@@ -1,0 +1,41 @@
+name: Auto Update MMV Data Daily
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # runs every day at 06:00 UK time (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml pandas
+
+      - name: Run scraper/updater
+        run: |
+          python mmv_daily_total.py
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mmv_total_streams.csv mmv_tracks_daily || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto update MMV totals"
+            git push
+          fi
